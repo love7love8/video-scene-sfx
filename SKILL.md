@@ -25,6 +25,27 @@ metadata:
 - 用户说"视频里的场景需要匹配的声音"
 - 用户想给 AI 生成的无声视频配音效
 - 用户提到"瀑布要有水声"、"森林要有虫鸣"等画面-音效对应需求
+- **用户说"有些画面没配音"** —— 说明场景检测模式漏掉了静止段，应改用 `--frame-method interval`
+- **用户说"按秒还是按帧截"** —— 用户在质疑帧提取策略，应该解释两种模式并推荐 interval（vlog）/ scene（动作视频）
+- **家庭 vlog / 节奏慢 / 风景 / 城市漫步类视频** —— 默认用 `--frame-method interval` 完整覆盖整段，避免漏段
+
+## 快速选择指南
+
+**不知道用什么模式?** 按视频类型选:
+
+| 视频类型 | 推荐参数 | 原因 |
+|---------|---------|------|
+| 家庭 vlog（深圳 CBD、滨江步道、城市漫步） | `--frame-method interval --frames-per-scene 4`（55s=12 帧） | 节奏慢、画面变化小，scene 模式只识别 2-3 帧会漏掉大半段 |
+| 旅行 vlog（场景频繁切换） | `--frame-method scene` | 一镜到底或动作场景多，scene 模式精准定位变化点 |
+| AI 生成视频（每几秒换场景） | `--frame-method scene --frames-per-scene 8` | 场景变化大，多取帧提升识别准确度 |
+| 短片/微电影 | `--frame-method scene` | 导演精心设计场景切换，scene 模式能跟随剪辑节奏 |
+
+**不知道用什么音量?** 按场景选:
+- 家庭 vlog 有原声/对话/环境音 → `--sfx-volume 0.4`
+- 旅行 vlog 有原声/音乐 → `--sfx-volume 0.5-0.6`
+- AI 无声视频 → `--sfx-volume 0.8-1.0`
+
+**不确定场景识别对不对?** 永远先跑 `--dry-run` 看识别结果再决定下载/合成。城市/CBD/室内场景识别率低的话用 `vision_analyze` 工具配合详细中文 prompt 逐帧分析（见 Pitfall 18）
 
 ## 核心工作流（4 阶段）
 
@@ -182,16 +203,34 @@ python3 {baseDir}/scripts/video_sfx_match.py <video_file> \
 
 ## 完整使用示例
 
-### 示例 1：给旅行 Vlog 配音效
+### 示例 1：给家庭 vlog / 旅行 vlog 配音效
 
 ```
-用户：帮我给这个旅行视频加点环境音效，视频里有森林、瀑布和街道场景
+用户：帮我给这个视频加点环境音效（家庭 vlog，城市 CBD + 滨江步道场景）
+```
+
+**默认推荐用 interval 模式**（家庭/旅行 vlog 节奏慢，scene 模式会漏段）：
+
+```bash
+# Step 1: 提帧 + 识别场景（不下载不合成，先 review）
+python3 {baseDir}/scripts/video_sfx_match.py <video_file> \
+  --frame-method interval --frames-per-scene 4 --dry-run
+
+# Step 2: review 场景识别结果（看 city_park / riverfront / grass 等标签是否合理）
+# 如果识别不准，用 vision_analyze 工具 + 详细中文 prompt 重写 scene_assignments.json
+
+# Step 3: 下载 + 合成
+python3 {baseDir}/scripts/video_sfx_match.py <video_file> \
+  --frame-method interval --frames-per-scene 4 \
+  --scenes-json scene_assignments.json \
+  --sfx-volume 0.4 --sfx-per-scene 2 \
+  --output 输出路径.mp4
 ```
 
 执行步骤：
-1. 运行脚本提取帧 + 识别场景
-2. vision 分析各帧 → `scene_assignments.json`
-3. 运行脚本下载音效 + 合成
+1. **Step 1**: interval 模式均匀提帧，MINIMAX 自动识别场景 → `scene_analysis.json`
+2. **Step 2**: review 识别结果，城市/CBD/室内场景识别率低时可手动用 `vision_analyze` 重写 → `scene_assignments.json`
+3. **Step 3**: 跑完整流程（下载 SFX + 合成）
 
 ### 示例 2：给 AI 生成视频配音效
 
