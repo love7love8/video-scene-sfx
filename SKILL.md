@@ -1,7 +1,7 @@
 ---
 name: 视频音效匹配
 description: 视频画面场景识别 + 站长之家匹配音效自动下载 + ffmpeg 合成。核心逻辑：先识别画面内容(MINIMAX-M3) → 联想该场景应有的声音 → 用中文关键词在站长之家搜索 → curl下载 → ffmpeg合成。输入一段视频，自动提取关键帧、识别场景、下载匹配音效、合成到视频里。
-version: 1.2.0
+version: 1.2.1
 tags: [media, video, sfx, audio, vlog, ffmpeg, scene-detection]
 author: Hermes Agent
 license: MIT
