@@ -101,6 +101,16 @@ SCENE_TO_SFX_SEARCH = {
         "sounds": ["车流声", "喇叭", "城市环境"],
         "tags": ["交通", "车流", "城市"],
     },
+    "city_park": {
+        "description": "城市公园/CBD 摩天楼下大草坪",
+        "sounds": ["城市环境", "车流", "风声", "鸟叫声", "孩子"],
+        "tags": ["城市", "车流", "鸟叫声", "风声"],
+    },
+    "riverfront": {
+        "description": "滨江/海边步道(城市河道边,有人骑车散步)",
+        "sounds": ["水声", "海鸥", "风声", "城市远景"],
+        "tags": ["水声", "海鸥", "风声", "城市"],
+    },
     "crowd": {
         "description": "人群聚集、庆祝",
         "sounds": ["人群声", "掌声", "欢呼声", "嘈杂"],
@@ -142,6 +152,9 @@ _KEYWORD_TO_PINYIN = {
     "走路": "zoulu", "叫卖": "jiaoshi", "嘈杂": "caoza", "人声": "rensheng",
     "燃烧": "ranshao", "火焰": "huoyan", "噼啪": "pipa", "踩雪": "caixue",
     "小鸟": "xiaoniao", "叽叽喳喳": "jijizhazha",
+    "海边": "haibian", "河边": "hebian", "滨江": "binjiang",
+    "广场": "guangchang", "公园": "gongyuan", "海风": "haifeng",
+    "水鸟": "shuiniao", "河水": "heshui",
 }
 
 # 标签页缓存：记录已抓取的标签页 HTML，避免重复请求
@@ -454,38 +467,42 @@ def composite_video(video_path, sfx_tracks, output_path, sfx_volume=0.6):
 
     num_sfx = len(sfx_tracks)
     video_has_audio = has_audio(video_path)
+    video_dur = video_duration(video_path) or 60.0
 
     inputs = ["-i", video_path]
     for i, (title, path) in enumerate(sfx_tracks):
         inputs.extend(["-i", path])
 
-    sfx_inputs = "".join(f"[{i+1}:a]" for i in range(num_sfx))
+    # 对每条 SFX:apad 补齐到视频时长,atrim 裁到视频时长,确保不裁短原视频
+    sfx_inputs = "".join(
+        f"[{i+1}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+        f"apad,atrim=0:{video_dur}[s{i}];"
+        for i in range(num_sfx)
+    )
+    sfx_mix_inputs = "".join(f"[s{i}]" for i in range(num_sfx))
+    sfx_mix = f"{sfx_mix_inputs}amix=inputs={num_sfx}:duration=longest:dropout_transition=0," \
+              f"volume={sfx_volume}[sfx]"
 
     if video_has_audio:
         filter_str = (
-            f"[0:v]copy[vid];"
             f"[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[orig];"
-            f"{sfx_inputs}amix=inputs={num_sfx}:duration=first:dropout_transition=0,"
-            f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            f"volume={sfx_volume}[sfx];"
-            f"[orig][sfx]amix=inputs=2:duration=first:dropout_transition=0[audio_out]"
+            f"{sfx_inputs}{sfx_mix};"
+            f"[orig][sfx]amix=inputs=2:duration=longest:dropout_transition=0[audio_out]"
         )
     else:
         filter_str = (
-            f"[0:v]copy[vid];"
-            f"{sfx_inputs}amix=inputs={num_sfx}:duration=first:dropout_transition=0,"
-            f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            f"volume={sfx_volume}[audio_out]"
+            f"{sfx_inputs}{sfx_mix};"
+            f"[sfx]anull[audio_out]"
         )
 
     cmd = ["ffmpeg", "-y", *inputs,
            "-filter_complex", filter_str,
-           "-map", "[vid]", "-map", "[audio_out]",
+           "-map", "0:v", "-map", "[audio_out]",
            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
            "-c:a", "aac", "-b:a", "192k",
-           "-shortest", output_path]
+           output_path]
 
-    print(f"  [ffmpeg] 合成视频 + {num_sfx} 条音效...")
+    print(f"  [ffmpeg] 合成视频 + {num_sfx} 条音效 (目标时长 {video_dur:.1f}s)...")
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
         err = result.stderr[-500:].decode("utf-8", errors="replace")
@@ -506,6 +523,8 @@ def main():
     parser.add_argument("--sfx-volume", type=float, default=1.0, help="音效音量（默认 1.0）")
     parser.add_argument("--dry-run", action="store_true", help="只提取帧并识别场景，不下载/合成")
     parser.add_argument("--scenes-json", help="手动指定场景 JSON（跳过 MINIMAX 分析）")
+    parser.add_argument("--frame-method", choices=["scene", "interval"], default="scene",
+                        help="帧提取方式: scene=场景检测(可能漏掉静止段) / interval=固定间隔(均匀覆盖整段视频)")
 
     args = parser.parse_args()
 
@@ -537,7 +556,7 @@ def main():
 
     # Step 1: Extract frames
     print(f"\n═══ Step 1: 提取关键帧 ═══")
-    frames = extract_frames(video_path, frames_dir, num_frames=args.frames_per_scene * 3)
+    frames = extract_frames(video_path, frames_dir, num_frames=args.frames_per_scene * 3, method=args.frame_method)
     if not frames:
         print("❌ 未能提取任何帧")
         sys.exit(1)

@@ -1,7 +1,7 @@
 ---
 name: 视频音效匹配
 description: 视频画面场景识别 + 站长之家匹配音效自动下载 + ffmpeg 合成。核心逻辑：先识别画面内容(MINIMAX-M3) → 联想该场景应有的声音 → 用中文关键词在站长之家搜索 → curl下载 → ffmpeg合成。输入一段视频，自动提取关键帧、识别场景、下载匹配音效、合成到视频里。
-version: 1.0.2
+version: 1.2.0
 tags: [media, video, sfx, audio, vlog, ffmpeg, scene-detection]
 author: Hermes Agent
 license: MIT
@@ -30,32 +30,56 @@ metadata:
 
 ### 阶段 1：提取关键帧
 
-用 ffmpeg 场景检测从视频中提取关键帧：
+用 ffmpeg 场景检测或固定间隔模式从视频中提取关键帧：
+
+**方式 A:场景检测（`--frame-method scene`，默认）**
+- ffmpeg `select='gt(scene,0.3)'` —— 只截前后帧差异>0.3 的画面
+- 适合**场景切换明显**的视频（vlog 一镜到底、连续动作镜头）
+- ⚠️ 缺点：画面静止/变化小的段（连续 10 秒都在同一画面）会被跳过，**那段视频就没配音效**
+
+**方式 B:固定间隔（`--frame-method interval`，vlog 推荐）**
+- 按视频时长均匀截 N 帧（如 55s 视频 + `--frames-per-scene 4` = 12 帧 = 每 4.6s 1 帧）
+- **完整覆盖整段视频**，每段时间都有机会被识别
+- 适合**节奏慢、场景变化不明显**的家庭 vlog、风景视频
 
 ```bash
+# 场景检测模式（默认）
 python3 {baseDir}/scripts/video_sfx_match.py <video_file> \
-  --frames-per-scene 5 --frame-method scene
+  --frame-method scene --frames-per-scene 6 --dry-run
+
+# 固定间隔模式（vlog 推荐）
+python3 {baseDir}/scripts/video_sfx_match.py <video_file> \
+  --frame-method interval --frames-per-scene 4 --dry-run
 ```
 
-这会在工作目录生成 `frames/` 下的关键帧 JPG 文件。
+`--dry-run` 只跑阶段 1+2（提帧 + 识别场景），不下载/合成。先 review 识别结果再决定要不要继续。
 
 **参数说明：**
-- `--frames-per-scene 5`：提取帧数（默认 5，复杂场景用 8-10）
-- `--frame-method scene`：场景检测模式（推荐），`interval` = 固定间隔
+- `--frames-per-scene N`：提取关键帧数（默认 5）。复杂/多场景视频用 8-10；短视频（<60s）用 6-8 防漏场景
+- 脚本内部固定用 ffmpeg `select='gt(scene,0.3)'` 场景检测；阈值 0.3 偏保守，画面变化不大的视频可能只识别 2-3 帧
+- ⚠️ 脚本**没有** `--frame-method` 和 `--output-dir` 参数——SKILL.md 早期版本里写过但脚本 CLI 不支持。输出路径用 `--output` 指定
 
 ### 阶段 2：场景识别（需要 vision 模型）
 
-对每个关键帧调用 vision 模型识别画面内容。**优先用 MINIMAX M3**（原生多模态，脚本内置），备选 `vision_analyze` 工具。
+对每个关键帧调用 vision 模型识别画面内容。脚本内置 `analyze_frames_with_minimax()` 函数用 MINIMAX M3 自动逐帧分析，但**实际推荐用 Hermes 的 `vision_analyze` 工具配合详细中文 prompt**，识别准确率高很多（见 Pitfall 18）。
 
-**MINIMAX M3 调用要点（脚本已内置，通常不需要手动调用）：**
+**MINIMAX M3 调用要点（脚本内置函数使用）：**
 - API 默认开启 thinking 模式，会只输出思考过程不返回结果
 - **必须加 `"thinking": {"type": "disabled"}` 参数**，否则只返回空内容
 - 图片需用 base64 编码后通过 `data:image/jpeg;base64,...` 传递
 - 需要 SSL 绕过（`ssl.CERT_NONE`），MINIMAX 证书链可能不完整
 - Prompt 要求只返回一个英文标签，不要解释
-- 脚本内置了 `analyze_frames_with_minimax(frame_paths, api_key)` 函数，自动逐帧调用
+- 已知问题：内置 prompt 太简短，复杂城市/混合场景识别率低（CBD 被识别为 grass，公园被识别为 unknown）
 
-**自然环境类：**
+**推荐替代：vision_analyze 工具 + 详细中文 prompt**
+
+```python
+# 对每个关键帧用 vision_analyze 看，prompt 要包含"什么地方/活动/天气/季节"等
+vision_analyze(
+    image_url=frame_path,
+    question="用中文详细描述这张画面: 这是什么地方? 看到了什么具体内容(建筑/植物/人物/活动)? 光线如何? 时间(白天/夜晚)? 天气? 场景应分类为以下哪一类: 城市街道/城市公园/草地/森林/河流/海浪/雨/雪/人群/市场/其他。"
+)
+```
 
 **核心逻辑：先识别画面内容 → 联想该场景下应有的声音 → 用具体关键词去站长之家搜索**
 
@@ -77,6 +101,8 @@ python3 {baseDir}/scripts/video_sfx_match.py <video_file> \
 | `birds` | 鸟类、鸟群飞过 | 鸟叫声、鸟鸣、叽叽喳喳 | 鸟叫声、小鸟、叽叽喳喳 |
 | `insects` | 昆虫（蝉、蟋蟀、蜜蜂等） | 虫鸣、蝉鸣、蜜蜂 | 虫鸣、蝉鸣、蜜蜂 |
 | `city_street` | 城市街道、马路、建筑 | 车流声、喇叭、城市环境 | 交通、车流、城市 |
+| `city_park` | 城市公园/CBD 摩天楼下大草坪 | 城市环境、车流、风声、鸟叫声 | 城市、车流、鸟叫声、风声 |
+| `riverfront` | 滨江/海边步道（城市河道边，有人骑车散步） | 水声、海鸥、风声、城市远景 | 水声、海鸥、风声、城市 |
 | `crowd` | 人群聚集、庆祝 | 人群声、掌声、欢呼声 | 人群、掌声、欢呼 |
 | `people_walking` | 人物走路、日常活动 | 脚步声、走路 | 脚步、走路 |
 | `market` | 市场、集市、商场 | 叫卖声、嘈杂、市场 | 叫卖、嘈杂、人声 |
@@ -142,10 +168,12 @@ python3 {baseDir}/scripts/video_sfx_match.py <video_file> \
 脚本自动将下载的音效与原始视频音频混合：
 
 - 原始音频保持 100% 音量
-- 音效以 60% 音量混入（`--sfx-volume 0.6`，可调 0.0-1.0）
+- 音效以 `--sfx-volume` 控制音量（**脚本默认 1.0**，vlog 有原声建议 0.5-0.6，AI 无声视频可用 0.8-1.0）
 - 使用 `amix` filter 混合所有音效轨道
-- 视频流直接 copy（不重新编码）
-- 输出 AAC 192kbps
+- 视频流**重新编码为 H.264**（`libx264 -preset fast -crf 23`，**不能** `-c:v copy`，因为 audio 走 filter_complex）
+- 输出 AAC（192kbps）
+- ✅ **时长保持**（1.2.0+ 修复）：每条 SFX 先 `apad` 补齐到视频时长，再 `atrim=0:{video_dur}` 裁切；`amix=duration=longest` 保证混合后时长 = 最长输入 = 视频原长。实测 55.4s 输入 → 55.4s 输出
+- ⚠️ 之前版本（≤1.1.0）用 `amix=duration=first` + `-shortest` 会**裁掉视频开头 1-2 秒**——已在 1.2.0 修复
 
 ```bash
 # 合成完成后输出：
@@ -194,12 +222,14 @@ python3 {baseDir}/scripts/video_sfx_match.py input.mp4 \
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--frames-per-scene` | 5 | 提取关键帧数 |
-| `--max-scenes` | 10 | 最大处理场景数 |
+| `--frame-method` | scene | `scene`=场景检测 / `interval`=固定间隔（vlog 推荐） |
 | `--sfx-per-scene` | 2 | 每个场景下载音效数 |
-| `--sfx-volume` | 0.6 | 音效音量 (0.0-1.0) |
-| `--frame-method` | scene | scene=场景检测 / interval=固定间隔 |
+| `--sfx-volume` | **1.0** | 音效音量 (0.0-1.0)。有原声 vlog 用 0.4-0.6；AI 无声视频用 0.8-1.0 |
 | `--dry-run` | false | 只提取帧不下载 |
-| `--scenes-json` | — | 手动指定场景 JSON |
+| `--scenes-json` | — | 手动指定场景 JSON（跳过 MINIMAX 自动识别） |
+| `--output` / `-o` | `视频目录/视频名_sfx.mp4` | 输出视频路径 |
+
+> 脚本**没有** `--output-dir`、`--max-scenes`、`--max-frames` 参数。早期 SKILL.md 里写过但脚本 CLI 不支持，不要按错。
 
 ## Pitfalls
 
@@ -211,12 +241,23 @@ python3 {baseDir}/scripts/video_sfx_match.py input.mp4 \
 6. **分类映射可能遗漏** — 如果 chinaz 有新的标签页分类，更新 `SCENE_TO_SFX_SEARCH` 映射表
 7. **源文件保护** — 输出总是写到 `视频名_video_sfx/` 新子目录，不覆盖原始视频（遵循林大哥的源文件保护规则）
 8. **场景→声音→关键词映射精度** — MINIMAX 识别的场景标签决定搜索关键词，如果场景识别偏差（如把"登山中"识别为"山顶"），搜索到的音效就不匹配。**关键是先正确识别画面内容**，关键词只是搜索手段
-9. **手动指定场景可能不符合实际画面** — 用户或 agent 手动指定的场景标签可能与视频实际画面不一致（如指定 sky 但实际是 mountain）。**应先分析关键帧再决定场景标签**，不要凭文件名/标题推断
+9. **手动指定场景可能不符合实际画面** — 用户或 agent 手动指定的场景标签可能与视频实际画面不一致（如指定 sky 但实际是 mountain）。**应先分析关键帧再决定场景标签**，不要凭文件名/标题推断。如果用户要求手动指定场景，agent 仍应先提取关键帧并分析，再与用户确认是否匹配
 10. **搜索结果取决于 chinaz 内容质量** — 站长之家某些关键词搜索结果可能不精准（如 `tansheng` 返回"忽忽音效"而非真正的喘息声）。如果搜索质量差，需要调整关键词或让用户手动指定
 11. **输出文件在独立子目录** — 脚本自动创建 `视频名_video_sfx/` 目录存放所有输出（场景分析 JSON、合成视频、音效文件），音效文件在 `sfx/` 子目录
-12. **搜索关键词必须用中文** — 向用户解释搜索意图时用中文（风声、鸟鸣、喘息、脚步），不要用拼音。脚本内部自动转拼音拼 URL
-13. **场景识别是核心，关键词只是手段** — 整个 pipeline 的精度取决于 MINIMAX 对画面的识别是否正确。如果识别结果不对，后续搜索关键词都不对。**先确认画面内容，再联想声音**。
-14. **标签页搜索结果取决于 chinaz 内容质量** — 某些关键词的搜索结果可能不精准（如 `tansheng` 返回"忽忽音效"而非真正的喘息声）。如果搜索质量差，需要调整关键词或让用户手动指定。
+12. **搜索关键词必须用中文** — 向用户解释搜索意图时用中文（风声、鸟鸣、喘息、脚步），不要用拼音。脚本内部自动转拼音拼 URL（`_KEYWORD_TO_PINYIN` 映射表）。SKILL.md 中的场景表 `tags` 列也写中文
+13. **场景识别是核心，关键词只是手段** — 整个 pipeline 的精度取决于 MINIMAX 对画面的识别是否正确。如果识别结果不对，后续搜索关键词都不对。**先确认画面内容，再联想声音**
+14. **标签页搜索结果取决于 chinaz 内容质量** — 某些关键词的搜索结果可能不精准（如 `tansheng` 返回"忽忽音效"而非真正的喘息声）。如果搜索质量差，需要调整关键词或让用户手动指定
+15. **音效文件复制到输出目录** — 脚本下载的音效文件（temp 目录）会自动复制到 `输出目录/sfx/` 子目录，方便用户查看和使用。工作目录（`/var/folders/...`）保留供调试，可手动清理
+16. **源文件保护** — 原始视频文件绝不能重命名、移动、覆盖或删除。所有输出写到独立子目录（`视频名_video_sfx/`），与源文件物理隔离。这是林大哥的硬性规则
+17. **`amix=duration=first` 裁掉视频开头 1-2 秒** — 实测 55.4s 输入 → 53.5s 输出。`duration=first` 会以首条输入流（视频）的时长为准，但首条前的 SFX padding 会被吞掉。**已在 1.2.0 修复**：用 `apad`+`atrim` 把每条 SFX 补齐到视频时长，`amix=duration=longest` 保留原长
+18. **vision_analyze 配合详细中文 prompt 比脚本内置 MINIMAX 一次性 one-liner 准很多** — 脚本内置的 prompt 只要求"返回一个英文标签"，对城市/室内/混合场景识别率低（实测把 CBD 摩天楼+大草坪识别成 `grass`、把儿童玩耍的城市公园识别成 `unknown`）。推荐流程：先用 `vision_analyze` 配合详细中文 prompt（"什么地方/建筑/人物/活动/天气/分类"）逐帧分析，再手动写 `scene_assignments.json` 喂给 `--scenes-json`
+19. **`--scenes-json` 的 label 必须在 `SCENE_TO_SFX_SEARCH` 里，否则静默失败** — 手动指定新场景类型（如 `city_park`）时，必须**同时**改脚本里的 `SCENE_TO_SFX_SEARCH`（加新场景的 description/sounds/tags）和 `_KEYWORD_TO_PINYIN`（加新中文关键词的拼音 URL）。改完后 `--help` 不会显示新场景，得跑一次 dry-run 验证映射生效
+20. **chinaz 部分关键词搜索质量差** — 实测以下关键词返回结果不符合预期：
+    - `海鸥` / `海边` → 经常返回海浪/海风，没有真正海鸥叫声
+    - `河边` / `滨江` → 经常返回山泉/瀑布/山野水声，没有城市河道
+    - `风声` → 前几条里可能出现"阴冷怪异的风""恐怖风声"等诡异风格，**不适合春节家庭温馨 vlog**
+    - `车流` → 经常搜不到结果（chinaz 该分类素材少），可改用 `城市`/`交通`
+21. **场景检测模式可能漏掉静止段** — 实测 55s 家庭 vlog 用 scene 模式只识别 3 帧（开/中/末），中间 30s 静止画面就**没配音效**。vlog 改用 `--frame-method interval` + `--frames-per-scene 4`（=12 帧）可完整覆盖
 
 ## 核心原则：先识别画面，再联想声音
 
